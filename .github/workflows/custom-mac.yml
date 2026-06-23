@@ -27,6 +27,9 @@ jobs:
     name: aarch64-apple-darwin
     runs-on: macos-14
     needs: [generate-bridge]
+    env:
+      # 有证书 secret 才执行签名+公证；没有则只出未签名版
+      SIGN_CERT: ${{ secrets.MACOS_P12_BASE64 }}
     strategy:
       fail-fast: false
       matrix:
@@ -146,3 +149,49 @@ jobs:
         with:
           name: rustdesk-unsigned-macos-${{ matrix.job.arch }}
           path: rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.dmg
+
+      # ============ 以下为签名 + 公证（配置了 secrets 才执行）============
+      - name: Import codesign certificate
+        if: env.SIGN_CERT != ''
+        uses: apple-actions/import-codesign-certs@253ddeeac23f2bdad1646faac5c8c2832e800071 # v1
+        with:
+          p12-file-base64: ${{ secrets.MACOS_P12_BASE64 }}
+          p12-password: ${{ secrets.MACOS_P12_PASSWORD }}
+          keychain: rustdesk
+
+      - name: Codesign app (Developer ID + hardened runtime)
+        if: env.SIGN_CERT != ''
+        run: |
+          security default-keychain -s rustdesk.keychain
+          security find-identity -v -p codesigning
+          APP="./flutter/build/macos/Build/Products/Release/RustDesk.app"
+          codesign --force --options runtime --deep --timestamp -s "${{ secrets.MACOS_CODESIGN_IDENTITY }}" "$APP" -vvv
+          codesign --verify --deep --strict --verbose=2 "$APP"
+
+      - name: Create + sign + notarize dmg
+        if: env.SIGN_CERT != ''
+        run: |
+          APP="./flutter/build/macos/Build/Products/Release/RustDesk.app"
+          DMG="rustdesk-${{ env.VERSION }}-signed-${{ matrix.job.arch }}.dmg"
+          CREATE_DMG="$(readlink -f "$(command -v create-dmg)")"
+          sed -i -e 's/MAXIMUM_UNMOUNTING_ATTEMPTS=3/MAXIMUM_UNMOUNTING_ATTEMPTS=7/' "$CREATE_DMG"
+          rm -f "$DMG"
+          create-dmg --icon "RustDesk.app" 200 190 --hide-extension "RustDesk.app" --window-size 800 400 --app-drop-link 600 185 "$DMG" "$APP"
+          codesign --force --options runtime --timestamp -s "${{ secrets.MACOS_CODESIGN_IDENTITY }}" "$DMG" -vvv
+          # 公证（App Store Connect API key）
+          echo "${{ secrets.MACOS_NOTARY_KEY_BASE64 }}" | base64 -d > AuthKey.p8
+          xcrun notarytool submit "$DMG" \
+            --key AuthKey.p8 \
+            --key-id "${{ secrets.MACOS_NOTARY_KEY_ID }}" \
+            --issuer "${{ secrets.MACOS_NOTARY_ISSUER_ID }}" \
+            --wait
+          xcrun stapler staple "$DMG"
+          xcrun stapler validate "$DMG"
+          rm -f AuthKey.p8
+
+      - name: Upload signed + notarized dmg
+        if: env.SIGN_CERT != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rustdesk-signed-macos-${{ matrix.job.arch }}
+          path: rustdesk-${{ env.VERSION }}-signed-${{ matrix.job.arch }}.dmg
