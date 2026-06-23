@@ -178,16 +178,14 @@ jobs:
           rm -f "$DMG"
           create-dmg --icon "RustDesk.app" 200 190 --hide-extension "RustDesk.app" --window-size 800 400 --app-drop-link 600 185 "$DMG" "$APP"
           codesign --force --options runtime --timestamp -s "${{ secrets.MACOS_CODESIGN_IDENTITY }}" "$DMG" -vvv
-          # 公证（App Store Connect API key）
-          echo "${{ secrets.MACOS_NOTARY_KEY_BASE64 }}" | base64 -d > AuthKey.p8
+          # 公证（Apple ID + App-Specific Password）
           xcrun notarytool submit "$DMG" \
-            --key AuthKey.p8 \
-            --key-id "${{ secrets.MACOS_NOTARY_KEY_ID }}" \
-            --issuer "${{ secrets.MACOS_NOTARY_ISSUER_ID }}" \
+            --apple-id "${{ secrets.MACOS_NOTARY_APPLE_ID }}" \
+            --password "${{ secrets.MACOS_NOTARY_PASSWORD }}" \
+            --team-id "${{ secrets.MACOS_NOTARY_TEAM_ID }}" \
             --wait
           xcrun stapler staple "$DMG"
           xcrun stapler validate "$DMG"
-          rm -f AuthKey.p8
 
       - name: Upload signed + notarized dmg
         if: env.SIGN_CERT != ''
