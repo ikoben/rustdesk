@@ -65,6 +65,31 @@ jobs:
           grep -q "\"$RD_SERVER\"" "$CFG" || { echo "::error::RENDEZVOUS_SERVERS 替换失败"; exit 1; }
           grep -q "$RD_KEY" "$CFG" || { echo "::error::RS_PUB_KEY 替换失败"; exit 1; }
 
+      # === 关键：彻底屏蔽"检查更新 / 自动升级"（仅 macOS 版）===
+      # 所有升级入口（首页横幅、后台自动下载 DMG、设置里手动检查）都走
+      # common.rs 的 do_check_software_update() + SOFTWARE_UPDATE_URL，
+      # 把这条链掐断即全部失效。
+      - name: Patch out update check (disable upgrade prompts)
+        run: |
+          set -e
+          # 1) Rust 内核：更新检查直接返回，SOFTWARE_UPDATE_URL 永远为空串
+          perl -0777 -i -pe 's#pub fn check_software_update\(\) \{#pub fn check_software_update() {\n    // custom build: update check disabled\n    return;#' src/common.rs
+          perl -0777 -i -pe 's#pub async fn do_check_software_update\(\) -> hbb_common::ResultType<\(\)> \{#pub async fn do_check_software_update() -> hbb_common::ResultType<()> {\n    // custom build: update check disabled\n    *SOFTWARE_UPDATE_URL.lock().unwrap() = "".to_string();\n    return Ok(());#' src/common.rs
+          # 2) Flutter：不注册更新事件、启动时不请求更新地址
+          perl -0777 -i -pe 's#void checkUpdate\(\) \{#void checkUpdate() {\n  // custom build: update check disabled\n  return;#' flutter/lib/common.dart
+          # 3) Flutter：首页"有新版本"卡片条件恒假（macOS 权限提示卡片不受影响）
+          perl -i -pe 's#updateUrl\.isNotEmpty &&#false &&#' flutter/lib/desktop/pages/desktop_home_page.dart
+
+          echo "----- 替换结果 -----"
+          grep -n -A3 "pub fn check_software_update()" src/common.rs
+          grep -n -A3 "pub async fn do_check_software_update" src/common.rs
+          grep -n -A2 "void checkUpdate()" flutter/lib/common.dart
+          grep -n -B1 -A2 "Widget buildHelpCards" flutter/lib/desktop/pages/desktop_home_page.dart
+
+          [ "$(grep -c 'custom build: update check disabled' src/common.rs)" = "2" ] || { echo "::error::common.rs 更新检查未屏蔽"; exit 1; }
+          grep -q 'custom build: update check disabled' flutter/lib/common.dart || { echo "::error::flutter checkUpdate 未屏蔽"; exit 1; }
+          grep -q 'updateUrl\.isNotEmpty' flutter/lib/desktop/pages/desktop_home_page.dart && { echo "::error::升级卡片未屏蔽"; exit 1; } || true
+
       - name: Install build runtime
         run: |
           brew install llvm create-dmg
